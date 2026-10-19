@@ -88,7 +88,7 @@ def save_session():
 EXIT_WORDS = ["goodbye", "bye", "exit", "quit"]
 
 # Chat structure
-print("\nHello. How can I help you today? ")
+print("\nAssistant: Hello. How can I help you today? ")
 print("(Type 'goodbye' to end.)")
 
 try:
@@ -100,7 +100,7 @@ try:
             continue
 
         if query.lower().strip(" !.") in EXIT_WORDS:
-            print("Please let me know if you require any further help.")
+            print("Assistant: Please let me know if you require any further help.")
             break
 
         # Send the question plus everything said so far
