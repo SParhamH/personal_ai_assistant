@@ -58,11 +58,12 @@ def make_site_search(name, description, sites):
     return Tool(name=name, func=run, description=description)
 
 
-# Acadamic search
+# Academic search
 academic_tool = make_site_search(
     name="academic_search",
-    description="Search academic sources (PubMed, arXiv preprints, Semantic Scholar). Use for research and scientific questions. arXiv papers are not always peer-reviewed.",
-    sites=["pubmed.ncbi.nlm.nih.gov", "arxiv.org", "semanticscholar.org"],
+    description="Search academic sources (PubMed, arXiv preprints, Semantic Scholar, google scholar). Use for research and scientific questions. arXiv papers are not always peer-reviewed.",
+    sites=["pubmed.ncbi.nlm.nih.gov", "arxiv.org",
+           "semanticscholar.org", "scholar.google.com"],
 )
 
 # Goverment official search
