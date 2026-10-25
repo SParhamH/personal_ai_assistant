@@ -1,4 +1,10 @@
 import requests
+
+# Wikipedia
+import os
+import wikipedia
+from dotenv import load_dotenv
+
 from langchain_community.tools import (
     WikipediaQueryRun,
     DuckDuckGoSearchRun,
@@ -6,8 +12,9 @@ from langchain_community.tools import (
 )
 from langchain_community.utilities import WikipediaAPIWrapper
 from langchain_core.tools import Tool, tool
+
 from datetime import datetime
-from memory_search import search_memory
+from chat_search import search_chat
 
 
 def safe(func, name):
@@ -30,8 +37,25 @@ search_tool = Tool(
 )
 
 # Wikipedia
+
+# Load .env here too: main.py imports tools.py before calling load_dotenv()
+load_dotenv()
+
+# Each user sets their own name in .env, so they get their own Wikipedia limit
+user_agent = os.getenv("WIKI_USER_AGENT")
+if user_agent:
+    wikipedia.set_user_agent(user_agent)
+else:
+    print("Tip: add WIKI_USER_AGENT to your .env file, or Wikipedia may limit your searches.")
+
+
 api_wrapper = WikipediaAPIWrapper(top_k_results=2, doc_content_chars_max=1000)
-wiki_tool = WikipediaQueryRun(api_wrapper=api_wrapper)
+wikipedia_search = WikipediaQueryRun(api_wrapper=api_wrapper)
+wiki_tool = Tool(
+    name="wikipedia",
+    func=safe(wikipedia_search.run, "wikipedia"),
+    description="Look up general background on a topic. Good for an overview, but not final proof for important claims.",
+)
 
 # News
 news_search = DuckDuckGoSearchResults(backend="news", num_results=5)
@@ -99,10 +123,10 @@ code_tool = make_site_search(
     ],
 )
 
-# Seach memory
-memory_tool = Tool(
-    name="search_memory",
-    func=search_memory,
+# Seach chat
+chat_tool = Tool(
+    name="search_chat",
+    func=search_chat,
     description="Search the user's past chats for a word or phrase. Use when the user asks what they said or discussed before."
 )
 
@@ -116,7 +140,7 @@ tools = [
     education_tool,
     trusted_tool,
     code_tool,
-    memory_tool,
+    chat_tool,
 ]
 
 # Planning to add weather, traffic, location

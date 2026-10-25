@@ -35,24 +35,24 @@ def save_to_txt(data: str, filename: str, folder: str = "research_logs"):
 # Json
 
 
-def save_to_json(data: dict, filename: str, folder: str = "memory"):
+def save_to_json(data: dict, filename: str, folder: str = "chats"):
     folder_path = Path(folder)
     folder_path.mkdir(exist_ok=True)
 
     json_filename = filename.replace(".txt", ".json")
     file_path = folder_path / json_filename
 
-    # Save structured memory for the AI to use later
+    # Save structured chat for the AI to use later
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
 
-    return f"JSON memory saved to {file_path}"
+    return f"JSON chat saved to {file_path}"
 
 # Order the saved chats
 # (Newest first)
 
 
-def list_sessions(folder: str = "memory"):
+def list_sessions(folder: str = "chats"):
     folder_path = Path(folder)
 
     # If no chats exits

@@ -1,7 +1,7 @@
 from storage import list_sessions, load_json
 
 
-def search_memory(keyword: str) -> str:
+def search_chat(keyword: str) -> str:
     """Finds past messages that contain all the important words."""
     # Lowercase, split into words
     # Skip tiny words like "of" and "the"
