@@ -36,6 +36,8 @@ parser = PydanticOutputParser(pydantic_object=Response)
 prompt = ChatPromptTemplate.from_messages(
     [
         ("system", SYSTEM_PROMPT),
+        ("system",
+         "Today's date is {today}. Use it to decide whether dates you read about are in the past or the future."),
         ("placeholder", "{chat_history}"),
         ("human", "{query}"),
         ("placeholder", "{agent_scratchpad}"),
@@ -51,11 +53,12 @@ agent = create_tool_calling_agent(
 
 # Agent excutor
 # verbose is for asking agent to show its work
+# return_intermediate_steps return the tools the agent really called, so we can check its claims
 agent_executor = AgentExecutor(
-    agent=agent, tools=tools, verbose=True, max_iterations=5)
+    agent=agent, tools=tools, verbose=True, max_iterations=5, return_intermediate_steps=True)
 
 
-# Using memory and searching old chats
+# Chat history and searching old chats
 # AI has no memory, so we resend this every turn
 chat_history = []
 
@@ -65,10 +68,13 @@ if past_chats:
     old_chat = load_json(past_chats[0])
 
     # Check the last 20 messages only
+    # Add each message once, as the right type.
     for m in old_chat["messages"][-20:]:
-        chat_history.append(HumanMessage(content=m["content"]))
-    else:
-        chat_history.append(AIMessage(content=m["content"]))
+        if m["role"] == "user":
+            chat_history.append(HumanMessage(content=m["content"]))
+        else:
+            chat_history.append(AIMessage(content=m["content"]))
+
 
 # This chat's record, rewritten after every answer
 filename = create_filename("chat")
@@ -105,7 +111,9 @@ try:
 
         # Send the question plus everything said so far
         raw_response = agent_executor.invoke(
-            {"query": query, "chat_history": chat_history}
+            {"query": query, "chat_history": chat_history,
+             "today": datetime.now().strftime("%B %d, %Y")
+             }
         )
 
         # OpenAI returns a string, Claude return a list
@@ -114,14 +122,39 @@ try:
         if isinstance(output, list):
             output = output[0]["text"]
 
+        # The tools that the agent called. We trust this over what the AI says it used.
+        tools_called = [action.tool for action,
+                        _ in raw_response.get("intermediate_steps", [])]
+
         try:
             structured_response = parser.parse(output)
+        except Exception:
+            # The AI sometimes writes text before the JSON, so try just the {...} part
+            start, end = output.find("{"), output.rfind("}")
+            try:
+                structured_response = parser.parse(output[start:end + 1])
+            except Exception:
+                structured_response = None
+
+        if structured_response:
             answer = structured_response.summary
             print(f"\nAssistant: {answer}")
-            print(f"(Sources: {', '.join(structured_response.sources)})")
-        except Exception:
+        else:
             answer = output
             print("\nAssistant:", answer)
+
+        # Show which tools really ran, whether or not the JSON worked
+        if tools_called:
+            # Only a parsed answer has a sources list
+            if structured_response:
+                print(f"(Sources: {', '.join(structured_response.sources)})")
+            # dict.fromkeys removes repeats but keeps the order
+            print(
+                f"(Tools used: {', '.join(dict.fromkeys(tools_called))})")
+        else:
+            # No tool ran, so any sources the AI listed were never checked
+            print(
+                "(No tools used: this answer comes from the model's own knowledge.)")
 
         # Remember this turn for the next question
         chat_history.append(HumanMessage(content=query))
