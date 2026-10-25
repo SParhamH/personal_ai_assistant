@@ -16,6 +16,7 @@ from storage import (
     list_sessions,
     load_json,
 )
+import personal_memory as pm
 
 load_dotenv()
 
@@ -32,12 +33,26 @@ class Response(BaseModel):
 llm = ChatOpenAI(model="gpt-4o-mini")
 parser = PydanticOutputParser(pydantic_object=Response)
 
+# Function that memory can use to talk to the AI
+# A plain AI call for the memory system (no tools, no chat history)
+
+
+def ask_llm(text):
+    content = llm.invoke(text).content
+    # AI answers (OpenAI returns a string, Claude returns a list of parts)
+    if isinstance(content, list):
+        content = "".join(p.get("text", "")
+                          for p in content if isinstance(p, dict))
+    return content
+
+
 # Prompt template
 prompt = ChatPromptTemplate.from_messages(
     [
         ("system", SYSTEM_PROMPT),
         ("system",
          "Today's date is {today}. Use it to decide whether dates you read about are in the past or the future."),
+        ("system", "{personal_memory}"),
         ("placeholder", "{chat_history}"),
         ("human", "{query}"),
         ("placeholder", "{agent_scratchpad}"),
@@ -93,6 +108,9 @@ def save_session():
 
 EXIT_WORDS = ["goodbye", "bye", "exit", "quit"]
 
+# Give the memory system a way to talk to the AI
+pm.setup(ask_llm)
+
 # Chat structure
 print("\nAssistant: Hello. How can I help you today? ")
 print("(Type 'goodbye' to end.)")
@@ -105,14 +123,28 @@ try:
         if not query:
             continue
 
+        if query.startswith("/"):
+            print(pm.handle_command(query) or "Unknown command.")
+            continue
+
         if query.lower().strip(" !.") in EXIT_WORDS:
+
+            # Review what the memory noticed before closing
+            print(pm.review())
+
             print("Assistant: Please let me know if you require any further help.")
             break
+
+        # "Remember ..." in a normal sentence is saved right away
+        memory_notice = pm.handle_message(query)
+        if memory_notice:
+            print(f"[Memory] {memory_notice}")
 
         # Send the question plus everything said so far
         raw_response = agent_executor.invoke(
             {"query": query, "chat_history": chat_history,
-             "today": datetime.now().strftime("%B %d, %Y")
+             "today": datetime.now().strftime("%B %d, %Y"),
+             "personal_memory": pm.build_memory_prompt(),
              }
         )
 
@@ -167,6 +199,11 @@ try:
         session["messages"].append(
             {"role": "assistant", "content": answer, "time": now})
         save_session()
+
+        # Collect this message so the AI can look for things worth remembering.
+        # Skipped when it was already saved as a "remember" request.
+        if not memory_notice:
+            pm.note_message(query)
 
 except KeyboardInterrupt:
     print("\nChat ended.")
