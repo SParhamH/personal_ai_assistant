@@ -109,11 +109,15 @@ def save_session():
 EXIT_WORDS = ["goodbye", "bye", "exit", "quit"]
 
 # Give the memory system a way to talk to the AI
-pm.setup(ask_llm)
+# Count today as an active day, archive old memories, and get any notices
+memory_notices = pm.setup(ask_llm)
 
 # Chat structure
 print("\nAssistant: Hello. How can I help you today? ")
 print("(Type 'goodbye' to end.)")
+
+if memory_notices:
+    print(f"[Memory] {memory_notices}")
 
 try:
     while True:

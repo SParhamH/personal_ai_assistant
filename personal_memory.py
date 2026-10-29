@@ -23,6 +23,11 @@ MAX_IN_PROMPT = 10
 INBOX_FILE = MEMORY_FOLDER / "inbox.json"
 LEARN_EVERY = 6
 
+# Archive memories
+ARCHIVE_FILE = MEMORY_FOLDER / "archive.json"
+UNUSED_DAYS = 90
+SUGGESTION_DAYS = 30
+
 # How many times an idea must come up before it's shown, after 0, 1, 2... skips
 ASK_AT = [1, 3, 8, 16, 32]
 
@@ -30,8 +35,9 @@ ASK_AT = [1, 3, 8, 16, 32]
 # What each file looks like before anything is saved.
 # More files (inbox, archive) get added here in later steps.
 DEFAULTS = {
-    MEMORIES_FILE: {"next_id": 1, "memories": []},
-    INBOX_FILE: {"pending_messages": [], "suggestions": []}
+    MEMORIES_FILE: {"next_id": 1, "active_days": 0, "last_active": "", "memories": []},
+    INBOX_FILE: {"pending_messages": [], "suggestions": []},
+    ARCHIVE_FILE: {"memories": []}
 }
 
 
@@ -56,11 +62,101 @@ def _save(path, data):
     temp.replace(path)
 
 
+# Clean up archive list
+def _clean_up():
+    """Archive memories unused for a long time, and drop old suggestions. Returns notices."""
+    data, archive, inbox = _load(MEMORIES_FILE), _load(
+        ARCHIVE_FILE), _load(INBOX_FILE)
+    day = data.get("active_days", 0)
+    notices = []
+
+    # Loop over a copy (list(...)), because we remove items from the real list
+    for m in list(data["memories"]):
+        # setdefault gives them today as a fresh start, saved once, so they age normally after.
+        m.setdefault("last_used", day)
+
+        if m.get("expires") and m["expires"] < _today():
+            reason = f"its date {m['expires']} passed"
+
+        elif day - m["last_used"] >= UNUSED_DAYS:
+            reason = f"not used in {UNUSED_DAYS} active days"
+
+        # still active, nothing to do
+        else:
+            continue
+
+        data["memories"].remove(m)
+        archive["memories"].append(
+            {**m, "archived": _today(), "reason": f"not used in {UNUSED_DAYS} active days"})
+        notices.append(f"Moved to archive: {m['text']} (not used in a while). "
+                       f"/restore {m['id']} brings it back.")
+
+    # Same fresh start for old suggestions, then drop ones that never came up again
+    for s in inbox["suggestions"]:
+        s.setdefault("last_seen_day", day)
+    inbox["suggestions"] = [s for s in inbox["suggestions"]
+                            if day - s["last_seen_day"] < SUGGESTION_DAYS]
+
+    _save(MEMORIES_FILE, data)
+    _save(ARCHIVE_FILE, archive)
+    _save(INBOX_FILE, inbox)
+    return "\n".join(notices)
+
+
+def list_archive():
+    """Everything in the archive, with when and why it was archived."""
+    memories = _load(ARCHIVE_FILE)["memories"]
+    if not memories:
+        return "The archive is empty"
+
+    lines = ["ARCHIVE"]
+    for m in memories:
+        lines.append(f" {m["id"]}. [{m.get('category', 'other')}] {m['text']} "
+                     f"(archived {m['archived']}: {m['reason']})")
+    return "\n".join(lines)
+
+
+# Restore from archive
+def restore(memory_id):
+    """Move a memory from the archive back to active memories."""
+    data, archive = _load(MEMORIES_FILE), _load(ARCHIVE_FILE)
+    m = next((m for m in archive["memories"] if m["id"] == memory_id), None)
+
+    if not m:
+        return f"There's no archived memory #{memory_id}."
+
+    archive["memories"].remove(m)
+
+    # Drop the archive fields, and give it a fresh start
+    # {k: v for k, v in m.items() if ...} is a dict comprehension. It copies every key except the ones we don’t want.
+    m = {k: v for k, v in m.items() if k not in ("archived", "reason")}
+    m["last_used"] = data.get("active_days", 0)
+
+    # Its old date already passed, so keep it without one
+    # (otherwise the next start would archive it again right away)
+    if m.get("expires") and m["expires"] < _today():
+        m["expires"] = None
+
+    data["memories"].append(m)
+    _save(MEMORIES_FILE, data)
+    _save(ARCHIVE_FILE, archive)
+
+    return f"Restored #{memory_id}: {m['text']}"
+
+
 # AI assistant to orginize the memory
 def setup(ask_llm):
     """Call once when the assistant starts. ask_llm: prompt text in, reply text out."""
     global _ask_llm
     _ask_llm = ask_llm
+
+    data = _load(MEMORIES_FILE)
+    # Count only the days that AI was active
+    if data.get("last_active") != _today():
+        data["active_days"] = data.get("active_days", 0) + 1
+        data["last_active"] = _today()
+        _save(MEMORIES_FILE, data)
+    return _clean_up()
 
 
 def _parse_json_list(reply):
@@ -81,7 +177,7 @@ def _ask_ai(text):
     memories = _load(MEMORIES_FILE)["memories"]
     categories = sorted({m.get("category", "other") for m in memories})
     prompt = f"""
-You are the long-term memory of a personal AI assistant.
+You are the long-term memory of a personal AI assistant. Today is {_today()}.
 The user asked you to remember something. Turn their message into memories.
 
 Rules:
@@ -89,11 +185,13 @@ Rules:
 - memory: one short, plain sentence about the user, like "Studies computer science".
 - category: reuse an existing category if one fits. Otherwise make a short lowercase one (1 or 2 words, with _ instead of spaces).
 - Never save passwords, keys, or ID numbers.
+- expires: "YYYY-MM-DD" if it is only true until a date (a deadline, this quarter, this semester), else null. If no exact day is given, use the last day of that period.
 
 Existing categories: {", ".join(categories) or "none yet"}
 
 Reply with ONLY a JSON list, like:
-[{{"memory": "Likes simple answers", "category": "answer_style"}}]
+[{{"memory": "Likes simple answers", "category": "answer_style", "expires": null}},
+ {{"memory": "Capstone is due in December", "category": "projects", "expires": "2026-12-31"}}]
 
 Message: {text}
 """
@@ -168,7 +266,8 @@ def remember_now(text, force=False):
     lines = []
     for item in items:
         lines.append(save_memory(item["memory"],
-                     _clean_category(item.get("category"))))
+                     _clean_category(item.get("category")),
+                     _clean_date(item.get("expires"))))
 
     return "\n".join(lines)
 
@@ -183,6 +282,16 @@ def _today():
 def _clean_category(name):
     """'Answer Style' -> 'answer_style'. Empty -> 'other'."""
     return str(name or "other").lower().strip().replace(" ", "_")
+
+
+# Helper to orginize by date
+def _clean_date(value):
+    """Turn the AI's date into 'YYYY-MM-DD', or None if it isn't a valid date."""
+    try:
+        return date.fromisoformat(str(value)).isoformat()
+    except ValueError:
+        # null, "December", "soon"... anything that isn't a real date
+        return None
 
 
 # Helper for inbox/suggestions
@@ -204,11 +313,15 @@ def _threshold(level):
 
 
 # Save memory file
-def save_memory(text, category="other"):
+def save_memory(text, category="other", expires=None):
     """Save one memory and return a message saying what happened."""
     text = text.strip()
     if not text:
         return "Nothing to save."
+
+    # A date that already passed means it isn't true anymore
+    if expires and expires < _today():
+        return f"Not saved: {text} (its date {expires} alreadyy passed)."
 
     data = _load(MEMORIES_FILE)
     # Don't save the exact same thing twice (ignore upper/lowercase)
@@ -217,7 +330,8 @@ def save_memory(text, category="other"):
             return f"Already saved as #{m['id']}."
 
     memory = {"id": data["next_id"], "text": text,
-              "category": category, "added": _today()}
+              "category": category, "added": _today(),
+              "last_used": data.get("archive_days", 0), "expires": expires}
     data["memories"].append(memory)
     data["next_id"] += 1
     _save(MEMORIES_FILE, data)
@@ -240,15 +354,17 @@ def list_memories():
     lines = []
     for category in sorted(groups):
         lines.append(category.upper())
-        for m in groups[category]:
-            lines.append(f"  {m['id']}. {m['text']}")
+        for m in sorted(groups[category], key=lambda m: m["id"]):
+            until = f" (until {m['expires']})" if m.get("expires") else ""
+            lines.append(f"  {m['id']}. {m['text']}{until}")
     return "\n".join(lines)
 
 
 # Memory prompt for each message
 def build_memory_prompt():
     """The memory text added to the AI's system prompt each turn."""
-    memories = _load(MEMORIES_FILE)["memories"]
+    data = _load(MEMORIES_FILE)
+    memories = data["memories"]
     if not memories:
         return ("Saved memories about the user: none yet.\n"
                 "Important: you cannot save anything yourself. If the user tells you how to act in the future (for example 'remember...', 'in the future...', 'always...') and it is NOT in the list above, do not say you will remember it. "
@@ -256,6 +372,12 @@ def build_memory_prompt():
 
     # For now, just the newest ones. A later step picks the ones that fit the question
     newest = memories[-MAX_IN_PROMPT:]
+
+    # Being sent to the AI counts as being used
+    for m in newest:
+        m["last_used"] = data.get("active_days", 0)
+    _save(MEMORIES_FILE, data)
+
     lines = [f"- ({m.get('category', 'other')}) {m['text']}" for m in newest]
     return ("Saved memories about the user:\n" + "\n".join(lines) +
             "\nUse these quietly when they help the answer. If one conflicts with what the user says now, follow the user. Don't list them unless the user asks.\n"
@@ -285,6 +407,8 @@ def _learn():
         # no internet or the AI failed: keep the messages and try again later
         return
 
+    day = _load(MEMORIES_FILE).get("active_days", 0)
+
     memories = _load(MEMORIES_FILE)["memories"]
     for item in items:
         text = item["memory"]
@@ -296,9 +420,10 @@ def _learn():
             text, s["memory"]) >= 0.6), None)
         if same:
             same["times_seen"] = same.get("times_seen", 1) + 1
+            same["last_seen_day"] = day
         else:
             inbox["suggestions"].append(
-                {**item, "times_seen": 1, "level": 0})
+                {**item, "times_seen": 1, "level": 0, "last_seen_day": day})
 
     inbox["pending_messages"] = []
     _save(INBOX_FILE, inbox)
@@ -336,14 +461,17 @@ def review():
 
     print("\nI noticed some things that may be worth remembering:")
     for n, s in enumerate(due, start=1):
-        print(f"  {n}. [{_clean_category(s.get('category'))}] {s['memory']}")
+        until = f"  (until {s['expires']})" if _clean_date(
+            s.get("expires")) else ""
+        print(
+            f"  {n}. [{_clean_category(s.get('category'))}] {s['memory']}{until}")
 
     chosen = _ask_which(len(due))
     lines = []
     for n, s in enumerate(due, start=1):
         if n in chosen:
             lines.append(save_memory(
-                s["memory"], _clean_category(s.get("category"))))
+                s["memory"], _clean_category(s.get("category")), _clean_date(s.get("expires"))))
             inbox["suggestions"].remove(s)   # saved, so it leaves the inbox
         else:
             # skipped: wait for more repeats
@@ -357,7 +485,29 @@ def review():
     return "\n".join(lines)
 
 
+# Fix the date manually
+def set_until(memory_id, value):
+    """Change a memory's end date, or remove it with 'never'."""
+    data = _load(MEMORIES_FILE)
+    m = next((m for m in data["memories"] if m["id"] == memory_id), None)
+
+    if not m:
+        return f"There's no active memory #{memory_id}."
+
+    if value.lower() == "never":
+        m["expires"] = None
+
+    else:
+        new_date = _clean_date(value)
+        if not new_date:
+            return f"Use: /until {memory_id} 2026-12-31   or   /until {memory_id} never"
+        m["expires"] = new_date
+    _save(MEMORIES_FILE, data)
+    return f"#{memory_id} now lasts {'until ' + m['expires'] if m['expires'] else 'with no end date'}."
+
 # Commands
+
+
 def handle_message(user_message):
     """
     Call before the AI answers. Saves "remember ..." requests right away.
@@ -375,13 +525,23 @@ def handle_message(user_message):
 
 def handle_command(text):
     """
-    Runs a memory command: /memories, /review, or /remember <text>.
+    Runs a memory command: /memories, /review, /archive, /restore, /until or /remember <text>.
     Returns the text to print, or None if it isn't a memory command.
     """
     if text == "/memories":
         return list_memories()
     if text == "/review":
         return review()
+    if text == "/archive":
+        return list_archive()
+    if text.startswith("/restore "):
+        number = text[len("/restore "):].strip()
+        return restore(int(number)) if number.isdigit() else "Use: /restore <number>"
+    if text.startswith("/until "):
+        parts = text.split()
+        if len(parts) == 3 and parts[1].isdigit():
+            return set_until(int(parts[1]), parts[2])
+        return "Use: /until <number> <YYYY-MM-DD or never>"
     if text.startswith("/remember "):
         return remember_now(text[len("/remember "):], force=True)
     return None
