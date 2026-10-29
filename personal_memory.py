@@ -13,6 +13,10 @@ import re
 # the AI function from main.py, given through setup()
 _ask_llm = None
 
+
+# The memories sent with the last answer (For /why)
+_last_used = []
+
 MEMORY_FOLDER = Path("memory")
 
 # Active memories
@@ -28,6 +32,13 @@ ARCHIVE_FILE = MEMORY_FOLDER / "archive.json"
 UNUSED_DAYS = 90
 SUGGESTION_DAYS = 30
 
+# Pin (memories the AI marks as permanent get pinned automatically)
+AUTO_PIN = True
+
+# Undo changes
+UNDO_FILE = MEMORY_FOLDER / "undo.json"
+UNDO_LIMIT = 20
+
 # How many times an idea must come up before it's shown, after 0, 1, 2... skips
 ASK_AT = [1, 3, 8, 16, 32]
 
@@ -37,8 +48,13 @@ ASK_AT = [1, 3, 8, 16, 32]
 DEFAULTS = {
     MEMORIES_FILE: {"next_id": 1, "active_days": 0, "last_active": "", "memories": []},
     INBOX_FILE: {"pending_messages": [], "suggestions": []},
-    ARCHIVE_FILE: {"memories": []}
+    ARCHIVE_FILE: {"memories": []},
+    UNDO_FILE: {"changes": []}
 }
+
+# The files /undo puts back, by name
+UNDO_FILES = {"memories": MEMORIES_FILE,
+              "inbox": INBOX_FILE, "archive": ARCHIVE_FILE}
 
 
 # Read memory file
@@ -48,6 +64,18 @@ def _load(path):
         return copy.deepcopy(DEFAULTS[path])
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+# Snapshot memories and archive before changes
+def _snapshot(description):
+    """Save a copy of all files before a change, so /undo can put them back."""
+    history = _load(UNDO_FILE)
+    files = {name: _load(path) for name, path in UNDO_FILES.items()}
+    history["changes"].append({"description": description, "files": files})
+
+    # Keep only the newest changes
+    history["changes"] = history["changes"][-UNDO_LIMIT:]
+    _save(UNDO_FILE, history)
 
 
 # Write memory file
@@ -78,7 +106,7 @@ def _clean_up():
         if m.get("expires") and m["expires"] < _today():
             reason = f"its date {m['expires']} passed"
 
-        elif day - m["last_used"] >= UNUSED_DAYS:
+        elif not m.get("pinned") and day - m["last_used"] >= UNUSED_DAYS:
             reason = f"not used in {UNUSED_DAYS} active days"
 
         # still active, nothing to do
@@ -97,6 +125,8 @@ def _clean_up():
     inbox["suggestions"] = [s for s in inbox["suggestions"]
                             if day - s["last_seen_day"] < SUGGESTION_DAYS]
 
+    if notices:
+        _snapshot("the automatic clean_up")
     _save(MEMORIES_FILE, data)
     _save(ARCHIVE_FILE, archive)
     _save(INBOX_FILE, inbox)
@@ -138,6 +168,8 @@ def restore(memory_id):
         m["expires"] = None
 
     data["memories"].append(m)
+
+    _snapshot(f"restoring #{memory_id}")
     _save(MEMORIES_FILE, data)
     _save(ARCHIVE_FILE, archive)
 
@@ -184,14 +216,15 @@ Rules:
 - One idea per memory. Split "I like simple answers with examples" into "Likes simple answers" and "Likes examples in explanations".
 - memory: one short, plain sentence about the user, like "Studies computer science".
 - category: reuse an existing category if one fits. Otherwise make a short lowercase one (1 or 2 words, with _ instead of spaces).
+- permanent: true if it will probably stay true for years (their name, degree, lasting preferences), else false.
 - Never save passwords, keys, or ID numbers.
 - expires: "YYYY-MM-DD" if it is only true until a date (a deadline, this quarter, this semester), else null. If no exact day is given, use the last day of that period.
 
 Existing categories: {", ".join(categories) or "none yet"}
 
 Reply with ONLY a JSON list, like:
-[{{"memory": "Likes simple answers", "category": "answer_style", "expires": null}},
- {{"memory": "Capstone is due in December", "category": "projects", "expires": "2026-12-31"}}]
+[{{"memory": "Likes simple answers", "category": "answer_style", "expires": null, "permanent": true}},
+ {{"memory": "Capstone is due in December", "category": "projects", "expires": "2026-12-31", "permanent": false}}]
 
 Message: {text}
 """
@@ -259,16 +292,21 @@ def remember_now(text, force=False):
     except Exception:
         # No internet, or AI call failed
         items = []
+    fallback = False
+
     if not items:
-        # From /remember, keep your words. From a normal sentence, save nothing.
-        return save_memory(text) if force else None
+        if not force:
+            return None
+        # The AI found nothing, but /remember means save it anyway, so save in user's own words
+        items = [{"memory": text}]
+        fallback = True
+    _snapshot("the last memory save")
 
-    lines = []
-    for item in items:
-        lines.append(save_memory(item["memory"],
-                     _clean_category(item.get("category")),
-                     _clean_date(item.get("expires"))))
-
+    lines = [_save_item(item) for item in items]
+    if fallback:
+        # Saved, but tell the user it wasn't sorted, so it isn't a silent surprise
+        lines.append("Note: I couldn't sort this properly, so I saved your exact words "
+                     "under 'other'. To redo it, use /undo and try /remember again if you like.")
     return "\n".join(lines)
 
 
@@ -304,6 +342,17 @@ def _similarity(a, b):
     return len(words_a & words_b) / len(words_a | words_b)
 
 
+# Helper for memory save
+def _save_item(item):
+    """Save one memory from the AI, with its category, end date, and pin."""
+    return save_memory(
+        item["memory"],
+        _clean_category(item.get("category")),
+        _clean_date(item.get("expires")),
+        AUTO_PIN and item.get("permanent") is True
+    )
+
+
 def _threshold(level):
     """How many times an idea must come up before it's shown, after `level` skips."""
     if level < len(ASK_AT):
@@ -313,7 +362,7 @@ def _threshold(level):
 
 
 # Save memory file
-def save_memory(text, category="other", expires=None):
+def save_memory(text, category="other", expires=None, pinned=False):
     """Save one memory and return a message saying what happened."""
     text = text.strip()
     if not text:
@@ -331,7 +380,9 @@ def save_memory(text, category="other", expires=None):
 
     memory = {"id": data["next_id"], "text": text,
               "category": category, "added": _today(),
-              "last_used": data.get("archive_days", 0), "expires": expires}
+              "last_used": data.get("archive_days", 0),
+              "expires": expires,
+              "pinned": pinned and not expires}
     data["memories"].append(memory)
     data["next_id"] += 1
     _save(MEMORIES_FILE, data)
@@ -355,24 +406,33 @@ def list_memories():
     for category in sorted(groups):
         lines.append(category.upper())
         for m in sorted(groups[category], key=lambda m: m["id"]):
-            until = f" (until {m['expires']})" if m.get("expires") else ""
-            lines.append(f"  {m['id']}. {m['text']}{until}")
+            tags = []
+            if m.get("pinned"):
+                tags.append("pinned")
+            if m.get("expires"):
+                tags.append(f"until {m['expires']}")
+
+            extra = f" ({', '.join(tags)})" if tags else ""
+            lines.append(f"  {m['id']}. {m['text']}{extra}")
     return "\n".join(lines)
 
 
 # Memory prompt for each message
 def build_memory_prompt():
     """The memory text added to the AI's system prompt each turn."""
+    # Lets this function change the _last_used at the top of the file
+    global _last_used
     data = _load(MEMORIES_FILE)
     memories = data["memories"]
     if not memories:
+        _last_used = []
         return ("Saved memories about the user: none yet.\n"
                 "Important: you cannot save anything yourself. If the user tells you how to act in the future (for example 'remember...', 'in the future...', 'always...') and it is NOT in the list above, do not say you will remember it. "
                 "Tell them to use /remember to save it.")
 
     # For now, just the newest ones. A later step picks the ones that fit the question
     newest = memories[-MAX_IN_PROMPT:]
-
+    _last_used = newest
     # Being sent to the AI counts as being used
     for m in newest:
         m["last_used"] = data.get("active_days", 0)
@@ -467,11 +527,11 @@ def review():
             f"  {n}. [{_clean_category(s.get('category'))}] {s['memory']}{until}")
 
     chosen = _ask_which(len(due))
+    _snapshot("the last review")
     lines = []
     for n, s in enumerate(due, start=1):
         if n in chosen:
-            lines.append(save_memory(
-                s["memory"], _clean_category(s.get("category")), _clean_date(s.get("expires"))))
+            lines.append(_save_item(s))
             inbox["suggestions"].remove(s)   # saved, so it leaves the inbox
         else:
             # skipped: wait for more repeats
@@ -483,6 +543,74 @@ def review():
 
     _save(INBOX_FILE, inbox)
     return "\n".join(lines)
+
+
+# Pin - Unpin - Forget
+def set_pin(memory_id, pinned):
+    """Pin a memory so it's never archived for being unused, or upin it."""
+    data = _load(MEMORIES_FILE)
+    m = next((m for m in data["memories"] if m["id"] == memory_id), None)
+
+    if not m:
+        return f"There's no active memory #{memory_id}."
+
+    if pinned and m.get("expires"):
+        return f"Sorry, #{memory_id} ends on {m['expires']}. Remove the deadline to use /pin."
+
+    m["pinned"] = pinned
+
+    _snapshot(f"{'pinning' if pinned else 'unpinning'} #{memory_id}")
+    _save(MEMORIES_FILE, data)
+    return f"{'Pinned' if pinned else 'Unpinned'} #{memory_id}: {m['text']}"
+
+
+def forget(memory_id):
+    """Delete a memory for good, whether it's active or archived."""
+    data, archive = _load(MEMORIES_FILE), _load(ARCHIVE_FILE)
+
+    # Check active memory first, then the archive
+    for path, collection in ((MEMORIES_FILE, data), (ARCHIVE_FILE, archive)):
+        m = next((m for m in collection["memories"]
+                 if m["id"] == memory_id), None)
+        if m:
+            # Pinned memories can't be deleted till it's unpinned
+            if m.get("pinned"):
+                return f"{memory_id} is pinned. Use /unpin {memory_id} first if you want to forget {memory_id}."
+
+            _snapshot(f"forgetting #{memory_id}")
+            collection["memories"].remove(m)
+            _save(path, collection)
+            return f"Forgot #{memory_id}: {m['text']} (/undo brings it back)"
+    return f"There's no memory #{memory_id}."
+
+
+# Undo
+def undo():
+    """Put the memory files back the way they were before the last change."""
+    history = _load(UNDO_FILE)
+
+    if not history["changes"]:
+        return "Nothing to undo."
+
+    # The newest change
+    change = history["changes"].pop()
+    for name, path in UNDO_FILES.items():
+        _save(path, change["files"][name])
+
+    _save(UNDO_FILE, history)
+    return f"Undid {change['description']}. ({len(history['changes'])} more to undo)"
+
+
+# Why
+def why():
+    """Show which memories were given to the AI for the last answer."""
+    if not _last_used:
+        return "No saved memories were used for the last answer."
+
+    lines = ["Memories given to the AI for the last answer:"]
+    for m in _last_used:
+        lines.append(f" {m['id']}. [{m.get('category', 'other')}] {m['text']}")
+    return '\n'.join(lines)
 
 
 # Fix the date manually
@@ -502,6 +630,10 @@ def set_until(memory_id, value):
         if not new_date:
             return f"Use: /until {memory_id} 2026-12-31   or   /until {memory_id} never"
         m["expires"] = new_date
+        # Memory with an end date can't be permanent
+        m["pinned"] = False
+
+    _snapshot(f"changing the date of #{memory_id}")
     _save(MEMORIES_FILE, data)
     return f"#{memory_id} now lasts {'until ' + m['expires'] if m['expires'] else 'with no end date'}."
 
@@ -525,9 +657,15 @@ def handle_message(user_message):
 
 def handle_command(text):
     """
-    Runs a memory command: /memories, /review, /archive, /restore, /until or /remember <text>.
+    Runs a memory command: /memories, /review, /archive, /restore, /until, /remember, /pin, /unpin, /forget, /undo, or /why  <text>.
     Returns the text to print, or None if it isn't a memory command.
     """
+    parts = text.split()
+    command = parts[0]
+    # The number after commands like /pin 4
+    # None if there isn't a valid one
+    number = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+
     if text == "/memories":
         return list_memories()
     if text == "/review":
@@ -544,4 +682,14 @@ def handle_command(text):
         return "Use: /until <number> <YYYY-MM-DD or never>"
     if text.startswith("/remember "):
         return remember_now(text[len("/remember "):], force=True)
+    if command in ("/pin", "/unpin", "/forget"):
+        if number is None:
+            return f"Use:{command} <number>"
+        if command == "/forget":
+            return forget(number)
+        return set_pin(number, command == "/pin")
+    if text == "/undo":
+        return undo()
+    if text == "/why":
+        return why()
     return None
