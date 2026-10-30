@@ -7,3 +7,15 @@ langchain-anthropic
 python-dotenv
 pydantic
 ddgs
+
+# Versions:
+# Python 3.13
+# ddgs==9.16.0
+# langchain==1.4.5
+# langchain-anthropic==1.7.6
+# langchain-classic==1.0.8
+# langchain-community==0.4.2
+# langchain-openai==1.7.2
+# pydantic==2.14.1
+# python-dotenv==1.2.4
+# wikipedia==1.4.0

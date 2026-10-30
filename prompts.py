@@ -77,9 +77,12 @@ SYSTEM_PROMPT = """
             - For code requests, include the code if requested, then give a short explanation.
             - For research requests, give the key point first, then list useful sources.
             - Avoid long background sections unless the user asks to learn deeply.
-            - If the answer needs more detail, say the main answer first and offer to go deeper.
+           - If the answer needs more detail, put it in the details field. Do not offer to go deeper or end with "feel free to ask."
             - The topic field must be a short topic name.
-            - The summary field must contain the answer.
+            - The summary field is the short answer: 1 to 3 simple sentences with the main point. Put any warning, risk, or uncertainty here.
+            - Code rule: when the user asks for code, the summary field MUST contain the complete code in a ```python block, followed by one sentence explaining it. Never leave the code only in the details field. Use the details field for a step-by-step walkthrough.            
+            - The details field is the full answer: steps, explanation, examples, and extra information. If the short answer already says everything, write "No more details."
+            - In the details field, only state facts that appear in the tool results. If you add something from your own knowledge, start that sentence with "From general knowledge:".
             - The sources field must always be a list of strings.
             - The tools_used field must always be a list of strings.
             - Put actual source names in the sources list.
@@ -88,6 +91,6 @@ SYSTEM_PROMPT = """
             - If no tool was used, write ["No tools used"] in tools_used.
             - If a tool was used, do not write ["No tools used"].
             - Do not include extra text outside the structured format.
-            - Your final answer must be only valid JSON in the format below. Never use markdown, headings, or text outside the JSON.\n
+            - Your final answer must be only valid JSON in the format below. Never put text outside the JSON. Code blocks inside the summary and details fields are allowed.\n
             {format_instructions}
 """

@@ -115,8 +115,8 @@ def _clean_up():
 
         data["memories"].remove(m)
         archive["memories"].append(
-            {**m, "archived": _today(), "reason": f"not used in {UNUSED_DAYS} active days"})
-        notices.append(f"Moved to archive: {m['text']} (not used in a while). "
+            {**m, "archived": _today(), "reason": reason})
+        notices.append(f"Moved to archive: {m['text']} ({reason}). "
                        f"/restore {m['id']} brings it back.")
 
     # Same fresh start for old suggestions, then drop ones that never came up again
@@ -141,7 +141,7 @@ def list_archive():
 
     lines = ["ARCHIVE"]
     for m in memories:
-        lines.append(f" {m["id"]}. [{m.get('category', 'other')}] {m['text']} "
+        lines.append(f" {m['id']}. [{m.get('category', 'other')}] {m['text']} "
                      f"(archived {m['archived']}: {m['reason']})")
     return "\n".join(lines)
 
@@ -243,7 +243,7 @@ def _find_suggestions(messages):
                         | {_clean_category(s.get("category")) for s in suggestions})
     numbered = "\n".join(f"{n}. {m}" for n, m in enumerate(messages, start=1))
     prompt = f"""
-You are the long-term memory of a personal AI assistant.
+You are the long-term memory of a personal AI assistant. Today is {_today()}.
 Read the user's recent messages and find things worth remembering about them:
 facts (studies, projects, goals, tools), how they like answers written or explained,
 how they code, and how they like to communicate.
@@ -255,6 +255,8 @@ Rules:
 - Don't suggest anything that is already saved (see the list below).
 - One idea per memory, as one short sentence about the user.
 - category: reuse an existing category if one fits. Otherwise make a short lowercase one, with _ instead of spaces.
+- permanent: true if it will probably stay true for years (their name, degree, lasting preferences), else false.
+- expires: "YYYY-MM-DD" if it is only true until a date (a deadline, this quarter, this semester), else null. If no exact day is given, use the last day of that period.
 - If an idea is the same as one in "Waiting suggestions", copy that wording exactly, so it counts as a repeat.
 
 Already saved:
@@ -266,7 +268,8 @@ Waiting suggestions:
 Existing categories: {", ".join(categories) or "none yet"}
 
 Reply with ONLY a JSON list, or [] if nothing is worth saving. Example:
-[{{"memory": "Likes simple answers", "category": "answer_style"}}]
+[{{"memory": "Likes simple answers", "category": "answer_style", "expires": null, "permanent": true}},
+ {{"memory": "Capstone is due in December", "category": "projects", "expires": "2026-12-31", "permanent": false}}]
 
 Messages:
 {numbered}
@@ -277,9 +280,14 @@ Messages:
 # Questions like "do you remember...?" are for the AI to answer, not saving requests
 QUESTION_START = re.compile(
     r"^\s*(do|did|can|could|would|will|what|when|why|how)\b", re.IGNORECASE)
-# Phrases that mean "save this"
-REMEMBER = re.compile(
-    r"\b(remember|don't forget|do not forget|keep in mind|from now on|for now on|going forward)\b", re.IGNORECASE)
+
+# "Save this" phrases that count only at the START of a message
+# (Ex: "I can't remember the formula" should not match)
+REMEMBER_START = re.compile(
+    r"^\s*(please\s+)?(remember|don't forget|do not forget|keep in mind)\b", re.IGNORECASE)
+# "Save this" phrases that are clear anywhere in the message
+REMEMBER_ANYWHERE = re.compile(
+    r"\b(from now on|for now on|going forward)\b", re.IGNORECASE)
 
 
 def remember_now(text, force=False):
@@ -380,7 +388,7 @@ def save_memory(text, category="other", expires=None, pinned=False):
 
     memory = {"id": data["next_id"], "text": text,
               "category": category, "added": _today(),
-              "last_used": data.get("archive_days", 0),
+              "last_used": data.get("active_day", 0),
               "expires": expires,
               "pinned": pinned and not expires}
     data["memories"].append(memory)
@@ -649,7 +657,7 @@ def handle_message(user_message):
     text = user_message.strip()
     if text.endswith("?") or QUESTION_START.match(text):
         return None
-    if REMEMBER.search(text):
+    if REMEMBER_START.search(text) or REMEMBER_ANYWHERE.search(text):
         return remember_now(text)
 
     return None

@@ -1,5 +1,3 @@
-import requests
-
 # Wikipedia
 import os
 import wikipedia
@@ -11,9 +9,8 @@ from langchain_community.tools import (
     DuckDuckGoSearchResults,
 )
 from langchain_community.utilities import WikipediaAPIWrapper
-from langchain_core.tools import Tool, tool
+from langchain_core.tools import Tool
 
-from datetime import datetime
 from chat_search import search_chat
 
 
@@ -36,8 +33,8 @@ search_tool = Tool(
     description="Search the web for current information, prices, local info, or when trusted sources are not enough.",
 )
 
-# Wikipedia
 
+# Wikipedia
 # Load .env here too: main.py imports tools.py before calling load_dotenv()
 load_dotenv()
 
@@ -126,7 +123,7 @@ code_tool = make_site_search(
 # Seach chat
 chat_tool = Tool(
     name="search_chat",
-    func=search_chat,
+    func=safe(search_chat, "Chat search"),
     description="Search the user's past chats for a word or phrase. Use when the user asks what they said or discussed before."
 )
 
