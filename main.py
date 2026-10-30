@@ -17,6 +17,7 @@ from storage import (
     load_json,
 )
 import personal_memory as pm
+import traceback
 import re
 
 load_dotenv()
@@ -205,11 +206,12 @@ try:
             raw_response = agent_executor.invoke(
                 {"query": query, "chat_history": chat_history,
                  "today": datetime.now().strftime("%B %d, %Y"),
-                 "personal_memory": pm.build_memory_prompt(),
+                 "personal_memory": pm.build_memory_prompt(query),
                  }
             )
         except Exception as e:
             # Problem - No internet, API error, or a tool crash
+            traceback.print_exc()
             print(
                 f"\nAssistant: Something went wrong, please try again. ({type(e).__name__})")
             continue

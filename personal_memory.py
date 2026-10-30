@@ -39,8 +39,17 @@ AUTO_PIN = True
 UNDO_FILE = MEMORY_FOLDER / "undo.json"
 UNDO_LIMIT = 20
 
+# Most "every answer" memory
+MAX_ALWAYS = 5
+
 # How many times an idea must come up before it's shown, after 0, 1, 2... skips
 ASK_AT = [1, 3, 8, 16, 32]
+
+
+NO_SAVING_RULE = ("Important: you cannot save anything yourself. If the user tells you how to act "
+                  "in the future (for example 'remember...', 'in the future...', 'always...') and "
+                  "it is NOT in the saved memories, do not say you will remember it. "
+                  "Tell them to use /remember to save it.")
 
 
 # What each file looks like before anything is saved.
@@ -350,6 +359,34 @@ def _similarity(a, b):
     return len(words_a & words_b) / len(words_a | words_b)
 
 
+# Common words that say nothing about a topic
+STOPWORDS = {
+    "the", "and", "for", "you", "your", "that", "this", "with", "have", "from",
+    "like", "likes", "user", "about", "what", "when", "which", "would", "should",
+    "could", "can", "are", "was", "will", "just", "want", "wants", "some", "more",
+    "most", "into", "also", "very", "them", "they", "their", "there", "than",
+    "then", "does", "did", "how", "why", "who", "its",
+}
+
+
+def _stem(word):
+    """Rough word shortening, so 'studies', 'study' and 'studying' all become 'study'."""
+    for ending in ("ies", "ing", "ed", "es", "s"):
+        if word.endswith(ending) and len(word) - len(ending) >= 3:
+            # 'studies' -> 'stud' + 'y'; everything else just loses its ending
+            word = word[:-len(ending)] + ("y" if ending == "ies" else "")
+            break
+
+    # 'code' and 'cod(ing)' both end up as 'cod'
+    return word.rstrip("e")
+
+
+def _words(text):
+    """The meaningful words in a text, shortened. 'Studies computer science' -> {'study', 'computer', 'scienc'}"""
+    words = re.findall(r"[a-z']+", text.lower())
+    return {_stem(w) for w in words if len(w) >= 3 and w not in STOPWORDS}
+
+
 # Helper for memory save
 def _save_item(item):
     """Save one memory from the AI, with its category, end date, and pin."""
@@ -425,32 +462,57 @@ def list_memories():
     return "\n".join(lines)
 
 
+# Pick the memories
+def _pick(user_message, memories):
+    """Choose the memories that fit this message, best first, each with the reason it was picked."""
+    message_words = _words(user_message)
+    always, matched = [], []
+
+    for m in memories:
+        if m.get("scope") == "always":
+            always.append((m, "applies to every answer"))
+            continue
+
+        # A memory can match through its text, its keywords, or its category name
+        memory_words = (_words(m["text"])
+                        | _words(" ".join(m.get("keywords", [])))
+                        | _words(m.get("category", "other").replace("_", " ")))
+
+        shared = message_words & memory_words
+
+        if shared:
+            matched.append((len(shared), m, "matched: " +
+                           ", ".join(sorted(shared))))
+
+    # More shared words first; on a tie, the newer memory (higher id) first
+    matched.sort(key=lambda x: (x[0], x[1]["id"]), reverse=True)
+    always = always[-MAX_ALWAYS:]
+    room = MAX_IN_PROMPT - len(always)
+
+    return always + [(m, reason) for _, m, reason in matched[:room]]
+
+
 # Memory prompt for each message
-def build_memory_prompt():
+def build_memory_prompt(user_message):
     """The memory text added to the AI's system prompt each turn."""
     # Lets this function change the _last_used at the top of the file
     global _last_used
     data = _load(MEMORIES_FILE)
-    memories = data["memories"]
-    if not memories:
-        _last_used = []
-        return ("Saved memories about the user: none yet.\n"
-                "Important: you cannot save anything yourself. If the user tells you how to act in the future (for example 'remember...', 'in the future...', 'always...') and it is NOT in the list above, do not say you will remember it. "
-                "Tell them to use /remember to save it.")
+    _last_used = _pick(user_message, data["memories"])
+    if not _last_used:
+        return "Saved memories about the user: none fit this message.\n" + NO_SAVING_RULE
 
-    # For now, just the newest ones. A later step picks the ones that fit the question
-    newest = memories[-MAX_IN_PROMPT:]
-    _last_used = newest
-    # Being sent to the AI counts as being used
-    for m in newest:
+    # Being sent counts as being used, so it won't age into the archive.
+    # These are the same dicts as in data, so changing them changes data too.
+    for m, _ in _last_used:
         m["last_used"] = data.get("active_days", 0)
     _save(MEMORIES_FILE, data)
 
-    lines = [f"- ({m.get('category', 'other')}) {m['text']}" for m in newest]
+    lines = [
+        f"- ({m.get('category', 'other')}) {m['text']}" for m, _ in _last_used]
     return ("Saved memories about the user:\n" + "\n".join(lines) +
             "\nUse these quietly when they help the answer. If one conflicts with what the user says now, follow the user. Don't list them unless the user asks.\n"
-            "Important: you cannot save anything yourself. If the user tells you how to act in the future (for example 'remember...', 'in the future...', 'always...') and it is NOT in the list above, do not say you will remember it. "
-            "Tell them to use /remember to save it.")
+            + NO_SAVING_RULE)
 
 
 # Collecting messages and filling the inbox
@@ -616,8 +678,9 @@ def why():
         return "No saved memories were used for the last answer."
 
     lines = ["Memories given to the AI for the last answer:"]
-    for m in _last_used:
-        lines.append(f" {m['id']}. [{m.get('category', 'other')}] {m['text']}")
+    for m, reason in _last_used:
+        lines.append(
+            f" {m['id']}. [{m.get('category', 'other')}] {m['text']} ({reason})")
     return '\n'.join(lines)
 
 
