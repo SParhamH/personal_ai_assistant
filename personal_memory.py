@@ -197,10 +197,13 @@ def setup(ask_llm):
         data["active_days"] = data.get("active_days", 0) + 1
         data["last_active"] = _today()
         _save(MEMORIES_FILE, data)
-    return _clean_up()
+
+    notices = [_upgrade_old_memories(), _clean_up()]
+    # skip empty notices
+    return "\n".join(n for n in notices if n)
 
 
-def _parse_json_list(reply):
+def _parse_json_list(reply, required="memory"):
     """AI replies are messy (code fences, extra words), so pull out just the [ ... ] part."""
     start, end = reply.find("["), reply.rfind("]")
     if start == -1 or end == -1:
@@ -210,7 +213,7 @@ def _parse_json_list(reply):
     except json.JSONDecodeError:
         return []
     # Keep only items shaped like {"memory": "...", ...}
-    return [i for i in items if isinstance(i, dict) and i.get("memory")]
+    return [i for i in items if isinstance(i, dict) and i.get(required)]
 
 
 def _ask_ai(text):
@@ -228,12 +231,14 @@ Rules:
 - permanent: true if it will probably stay true for years (their name, degree, lasting preferences), else false.
 - Never save passwords, keys, or ID numbers.
 - expires: "YYYY-MM-DD" if it is only true until a date (a deadline, this quarter, this semester), else null. If no exact day is given, use the last day of that period.
+- scope: "always" for preferences about HOW to answer, which fit any question (like "Likes simple answers", "Likes examples in explanations", "Likes friendly answers"). "topic" for facts and preferences about a subject (like "Name is Parham", "Learning C#", "Wants short code comments").
+- keywords: 4 to 6 lowercase words a future question might contain when this memory is useful. Include related words, not only words from the memory.
 
 Existing categories: {", ".join(categories) or "none yet"}
 
 Reply with ONLY a JSON list, like:
-[{{"memory": "Likes simple answers", "category": "answer_style", "expires": null, "permanent": true}},
- {{"memory": "Capstone is due in December", "category": "projects", "expires": "2026-12-31", "permanent": false}}]
+[{{"memory": "Likes simple answers", "category": "answer_style", "expires": null, "permanent": true, "scope": "always", "keywords": ["explain", "answer", "simple"]}},
+ {{"memory": "Capstone is due in December", "category": "projects", "expires": "2026-12-31", "permanent": false, "scope": "topic", "keywords": ["capstone", "deadline", "project", "due"]}}]
 
 Message: {text}
 """
@@ -266,6 +271,8 @@ Rules:
 - category: reuse an existing category if one fits. Otherwise make a short lowercase one, with _ instead of spaces.
 - permanent: true if it will probably stay true for years (their name, degree, lasting preferences), else false.
 - expires: "YYYY-MM-DD" if it is only true until a date (a deadline, this quarter, this semester), else null. If no exact day is given, use the last day of that period.
+- scope: "always" for preferences about HOW to answer, which fit any question (like "Likes simple answers", "Likes examples in explanations", "Likes friendly answers"). "topic" for facts and preferences about a subject (like "Name is Parham", "Learning C#", "Wants short code comments").
+- keywords: 4 to 6 lowercase words a future question might contain when this memory is useful. Include related words, not only words from the memory.
 - If an idea is the same as one in "Waiting suggestions", copy that wording exactly, so it counts as a repeat.
 
 Already saved:
@@ -277,8 +284,8 @@ Waiting suggestions:
 Existing categories: {", ".join(categories) or "none yet"}
 
 Reply with ONLY a JSON list, or [] if nothing is worth saving. Example:
-[{{"memory": "Likes simple answers", "category": "answer_style", "expires": null, "permanent": true}},
- {{"memory": "Capstone is due in December", "category": "projects", "expires": "2026-12-31", "permanent": false}}]
+[{{"memory": "Likes simple answers", "category": "answer_style", "expires": null, "permanent": true, "scope": "always", "keywords": ["explain", "answer", "simple"]}},
+ {{"memory": "Capstone is due in December", "category": "projects", "expires": "2026-12-31", "permanent": false, "scope": "topic", "keywords": ["capstone", "deadline", "project", "due"]}}]
 
 Messages:
 {numbered}
@@ -349,6 +356,19 @@ def _clean_date(value):
         return None
 
 
+# Helper to choose the memory and keywords
+def _clean_scope(value):
+    """Only "always" counts as every answer. Anything else from the AI means topic."""
+    return "always" if value == "always" else "topic"
+
+
+def _clean_keywords(value):
+    """A short list of lowercase words, or [] if the AI sent something else."""
+    if not isinstance(value, list):
+        return []
+    return [str(k).lower().strip() for k in value][:8]
+
+
 # Helper for inbox/suggestions
 def _similarity(a, b):
     """0 to 1: how many words two sentences share. 1 means exactly the same words."""
@@ -389,12 +409,14 @@ def _words(text):
 
 # Helper for memory save
 def _save_item(item):
-    """Save one memory from the AI, with its category, end date, and pin."""
+    """Save one memory from the AI, with all its labels."""
     return save_memory(
         item["memory"],
         _clean_category(item.get("category")),
         _clean_date(item.get("expires")),
-        AUTO_PIN and item.get("permanent") is True
+        AUTO_PIN and item.get("permanent") is True,
+        _clean_scope(item.get("scope")),
+        _clean_keywords(item.get("keywords"))
     )
 
 
@@ -407,7 +429,7 @@ def _threshold(level):
 
 
 # Save memory file
-def save_memory(text, category="other", expires=None, pinned=False):
+def save_memory(text, category="other", expires=None, pinned=False, scope="topic", keywords=None):
     """Save one memory and return a message saying what happened."""
     text = text.strip()
     if not text:
@@ -415,7 +437,7 @@ def save_memory(text, category="other", expires=None, pinned=False):
 
     # A date that already passed means it isn't true anymore
     if expires and expires < _today():
-        return f"Not saved: {text} (its date {expires} alreadyy passed)."
+        return f"Not saved: {text} (its date {expires} already passed)."
 
     data = _load(MEMORIES_FILE)
     # Don't save the exact same thing twice (ignore upper/lowercase)
@@ -425,9 +447,11 @@ def save_memory(text, category="other", expires=None, pinned=False):
 
     memory = {"id": data["next_id"], "text": text,
               "category": category, "added": _today(),
-              "last_used": data.get("active_day", 0),
+              "last_used": data.get("active_days", 0),
               "expires": expires,
-              "pinned": pinned and not expires}
+              "pinned": pinned and not expires,
+              "scope": scope,
+              "keywords": keywords or []}
     data["memories"].append(memory)
     data["next_id"] += 1
     _save(MEMORIES_FILE, data)
@@ -456,6 +480,8 @@ def list_memories():
                 tags.append("pinned")
             if m.get("expires"):
                 tags.append(f"until {m['expires']}")
+            if m.get("scope") == "always":
+                tags.append("every answer")
 
             extra = f" ({', '.join(tags)})" if tags else ""
             lines.append(f"  {m['id']}. {m['text']}{extra}")
@@ -533,8 +559,9 @@ def _learn():
         return
     try:
         items = _find_suggestions(inbox["pending_messages"])
-    except Exception:
+    except Exception as error:
         # no internet or the AI failed: keep the messages and try again later
+        print(f"(Memory check failed: {error})")
         return
 
     day = _load(MEMORIES_FILE).get("active_days", 0)
@@ -634,6 +661,19 @@ def set_pin(memory_id, pinned):
     return f"{'Pinned' if pinned else 'Unpinned'} #{memory_id}: {m['text']}"
 
 
+def set_scope(memory_id, scope):
+    """Choose whether a memory is sent with every answer ("always") or only when it fits ("topic")."""
+    data = _load(MEMORIES_FILE)
+    m = next((m for m in data["memories"] if m["id"] == memory_id), None)
+    if not m:
+        return f"There's no active memory #{memory_id}"
+    _snapshot(f"Changing the scope of #{memory_id}")
+    m["scope"] = scope
+    _save(MEMORIES_FILE, data)
+    where = "every answer" if scope == "always" else "only when it fits the question"
+    return f"#{memory_id} is now used for {where}: {m['text']}"
+
+
 def forget(memory_id):
     """Delete a memory for good, whether it's active or archived."""
     data, archive = _load(MEMORIES_FILE), _load(ARCHIVE_FILE)
@@ -645,7 +685,7 @@ def forget(memory_id):
         if m:
             # Pinned memories can't be deleted till it's unpinned
             if m.get("pinned"):
-                return f"{memory_id} is pinned. Use /unpin {memory_id} first if you want to forget {memory_id}."
+                return f"#{memory_id} is pinned. Use /unpin {memory_id} first if you want to forget {memory_id}."
 
             _snapshot(f"forgetting #{memory_id}")
             collection["memories"].remove(m)
@@ -708,9 +748,53 @@ def set_until(memory_id, value):
     _save(MEMORIES_FILE, data)
     return f"#{memory_id} now lasts {'until ' + m['expires'] if m['expires'] else 'with no end date'}."
 
+
+# Upgrade memories
+def _upgrade_old_memories():
+    """Give memories that are saved before a scope and keywords, using one AI call."""
+    data = _load(MEMORIES_FILE)
+    old = [m for m in data["memories"] if "scope" not in m]
+
+    # Nothing the upgrade
+    if not old:
+        return ""
+
+    listed = "\n".join(f"#{m['id']} {m['text']}" for m in old)
+    prompt = f"""
+You help organize the long-term memory of a personal AI assistant.
+For each memory below, decide:
+- scope: "always" for preferences about HOW to answer, which fit any question (like "Likes simple answers", "Likes examples in explanations", "Likes friendly answers"). "topic" for facts and preferences about a subject (like "Name is Parham", "Learning C#", "Wants short code comments").
+- keywords: 4 to 6 lowercase words a future question might contain when this memory is useful. Include related words, not only words from the memory. Example for "Prefers learning from videos": ["video", "youtube", "tutorial", "watch", "course"].
+
+Reply with ONLY a JSON list, one item per memory:
+[{{"id": 3, "scope": "topic", "keywords": ["code", "python", "editor", "vscode"]}}]
+
+Memories:
+{listed}
+"""
+    try:
+        items = _parse_json_list(_ask_llm(prompt), required="id")
+    except Exception as error:
+        return f"(Couldn't upgrade old memories yet: {error}. I'll try again next time.)"
+
+    # Look up each label by id
+    labels = {str(item["id"]).lstrip("#"): item for item in items}
+    upgraded = 0
+    for m in old:
+        label = labels.get(str(m["id"]))
+        if label:
+            m["scope"] = _clean_scope(label.get("scope"))
+            m["keywords"] = _clean_keywords(label.get("keywords"))
+            upgraded += 1
+
+    if upgraded:
+        _snapshot("upgrading old memories")
+        _save(MEMORIES_FILE, data)
+
+    return f"Upgraded {upgraded} old memories with scopes and keywords." if upgraded else ""
+
+
 # Commands
-
-
 def handle_message(user_message):
     """
     Call before the AI answers. Saves "remember ..." requests right away.
@@ -728,7 +812,7 @@ def handle_message(user_message):
 
 def handle_command(text):
     """
-    Runs a memory command: /memories, /review, /archive, /restore, /until, /remember, /pin, /unpin, /forget, /undo, or /why  <text>.
+    Runs a memory command: /memories, /review, /archive, /restore, /until, /remember, /pin, /unpin, /forget, /undo, /why, /always, /topic  <text>.
     Returns the text to print, or None if it isn't a memory command.
     """
     parts = text.split()
@@ -755,10 +839,14 @@ def handle_command(text):
         return remember_now(text[len("/remember "):], force=True)
     if command in ("/pin", "/unpin", "/forget"):
         if number is None:
-            return f"Use:{command} <number>"
+            return f"Use: {command} <number>"
         if command == "/forget":
             return forget(number)
         return set_pin(number, command == "/pin")
+    if command in ("/always", "/topic"):
+        if number is None:
+            return f"Use: {command} <number>"
+        return set_scope(number, "always" if command == "/always" else "topic")
     if text == "/undo":
         return undo()
     if text == "/why":
