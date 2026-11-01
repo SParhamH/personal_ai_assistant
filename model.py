@@ -9,8 +9,13 @@ from langchain_openai import ChatOpenAI
 # Load .env here. The API key must exist before the model is created
 load_dotenv()
 
+
+# The one place the model is chosen. The prompt reads these too, so the assistant always knows which model it runs on.
+MODEL_PROVIDER = "OpenAI"
+MODEL_NAME = "gpt-4o-mini"
+
 # Model that is used
-llm = ChatOpenAI(model="gpt-4o-mini")
+llm = ChatOpenAI(model=MODEL_NAME)
 
 
 # Function that memory can use to talk to the AI

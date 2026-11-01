@@ -21,7 +21,7 @@ MEMORY_FOLDER = Path("memory")
 
 # Active memories
 MEMORIES_FILE = MEMORY_FOLDER / "memories.json"
-MAX_IN_PROMPT = 10
+MAX_IN_PROMPT = 12
 
 # Inbox suggestions
 INBOX_FILE = MEMORY_FOLDER / "inbox.json"
@@ -40,7 +40,7 @@ UNDO_FILE = MEMORY_FOLDER / "undo.json"
 UNDO_LIMIT = 20
 
 # Most "every answer" memory
-MAX_ALWAYS = 5
+MAX_ALWAYS = 7
 
 # How many times an idea must come up before it's shown, after 0, 1, 2... skips
 ASK_AT = [1, 3, 8, 16, 32]
@@ -64,6 +64,23 @@ DEFAULTS = {
 # The files /undo puts back, by name
 UNDO_FILES = {"memories": MEMORIES_FILE,
               "inbox": INBOX_FILE, "archive": ARCHIVE_FILE}
+
+
+HELP = """
+Memory commands:
+  /memories                 open the memory menu (categories, archive, inbox)
+  /remember <text>          save something right now
+  /review                   see what I noticed and choose what to save
+  /why                      which memories shaped the last answer
+  /forget <n>               delete memory n (pinned ones need /unpin first)
+  /pin <n>, /unpin <n>      keep memory n from being archived, or undo 
+  /always <n>, /topic <n>   use memory n in every answer, or only when it fits
+  /until <n> <date>         set an end date (2026-12-31), or /until <n> never
+  /archive                  show archived memories
+  /restore <n>              bring memory n back from the archive
+  /undo                     undo the last memory change
+You can also say "remember that..." or "from now on..." in a normal message.
+"""
 
 
 # Read memory file
@@ -199,6 +216,10 @@ def setup(ask_llm):
         _save(MEMORIES_FILE, data)
 
     notices = [_upgrade_old_memories(), _clean_up()]
+    waiting = len(_due(_load(INBOX_FILE)))
+    if waiting:
+        notices.append(
+            f"{waiting} memory suggestion(s) waiting. Type /review to see them.")
     # skip empty notices
     return "\n".join(n for n in notices if n)
 
@@ -220,6 +241,8 @@ def _ask_ai(text):
     """Ask the AI to turn the user's words into short, categorized memories."""
     memories = _load(MEMORIES_FILE)["memories"]
     categories = sorted({m.get("category", "other") for m in memories})
+    saved = "\n".join(
+        f"#{m['id']} {m['text']}" for m in memories) or "none yet"
     prompt = f"""
 You are the long-term memory of a personal AI assistant. Today is {_today()}.
 The user asked you to remember something. Turn their message into memories.
@@ -228,17 +251,21 @@ Rules:
 - One idea per memory. Split "I like simple answers with examples" into "Likes simple answers" and "Likes examples in explanations".
 - memory: one short, plain sentence about the user, like "Studies computer science".
 - category: reuse an existing category if one fits. Otherwise make a short lowercase one (1 or 2 words, with _ instead of spaces).
+- replaces: the number of a saved memory that this new one changes or contradicts, so the old one is no longer true (like #8 "Wants short code comments" becoming "Wants detailed code comments"), else null. Don't use it when both can be true at once.
 - permanent: true if it will probably stay true for years (their name, degree, lasting preferences), else false.
 - Never save passwords, keys, or ID numbers.
 - expires: "YYYY-MM-DD" if it is only true until a date (a deadline, this quarter, this semester), else null. If no exact day is given, use the last day of that period.
 - scope: "always" for preferences about HOW to answer, which fit any question (like "Likes simple answers", "Likes examples in explanations", "Likes friendly answers"). "topic" for facts and preferences about a subject (like "Name is Parham", "Learning C#", "Wants short code comments").
 - keywords: 4 to 6 lowercase words a future question might contain when this memory is useful. Include related words, not only words from the memory.
 
+Saved memories:
+{saved}
+
 Existing categories: {", ".join(categories) or "none yet"}
 
 Reply with ONLY a JSON list, like:
-[{{"memory": "Likes simple answers", "category": "answer_style", "expires": null, "permanent": true, "scope": "always", "keywords": ["explain", "answer", "simple"]}},
- {{"memory": "Capstone is due in December", "category": "projects", "expires": "2026-12-31", "permanent": false, "scope": "topic", "keywords": ["capstone", "deadline", "project", "due"]}}]
+[{{"memory": "Likes simple answers", "category": "answer_style", "expires": null, "permanent": true, "scope": "always", "keywords": ["explain", "answer", "simple"], "replaces": null}},
+ {{"memory": "Capstone is due in December", "category": "projects", "expires": "2026-12-31", "permanent": false, "scope": "topic", "keywords": ["capstone", "deadline", "project", "due"], "replaces": null}}]
 
 Message: {text}
 """
@@ -250,7 +277,8 @@ def _find_suggestions(messages):
     """Ask the AI what's worth remembering in the user's recent messages."""
     memories = _load(MEMORIES_FILE)["memories"]
     suggestions = _load(INBOX_FILE)["suggestions"]
-    saved = "\n".join(f"- {m['text']}" for m in memories) or "none yet"
+    saved = "\n".join(
+        f"#{m['id']} {m['text']}" for m in memories) or "none yet"
     waiting = "\n".join(f"- {s['memory']}" for s in suggestions) or "none"
     # Categories from saved memories AND waiting suggestions, so the AI reuses them
     categories = sorted({m.get("category", "other") for m in memories}
@@ -266,9 +294,10 @@ Rules:
 - Only keep things that will still matter next month. Skip one-time requests and plain questions.
 - Skip private topics like health, money, or family problems, because the user didn't ask to save those.
 - Never save passwords, keys, or ID numbers.
-- Don't suggest anything that is already saved (see the list below).
+- Don't suggest anything already saved, unless it changes or contradicts a saved memory (then use replaces).
 - One idea per memory, as one short sentence about the user.
 - category: reuse an existing category if one fits. Otherwise make a short lowercase one, with _ instead of spaces.
+- replaces: the number of a saved memory that this new one changes or contradicts, so the old one is no longer true (like #8 "Wants short code comments" becoming "Wants detailed code comments"), else null. Don't use it when both can be true at once.
 - permanent: true if it will probably stay true for years (their name, degree, lasting preferences), else false.
 - expires: "YYYY-MM-DD" if it is only true until a date (a deadline, this quarter, this semester), else null. If no exact day is given, use the last day of that period.
 - scope: "always" for preferences about HOW to answer, which fit any question (like "Likes simple answers", "Likes examples in explanations", "Likes friendly answers"). "topic" for facts and preferences about a subject (like "Name is Parham", "Learning C#", "Wants short code comments").
@@ -284,8 +313,8 @@ Waiting suggestions:
 Existing categories: {", ".join(categories) or "none yet"}
 
 Reply with ONLY a JSON list, or [] if nothing is worth saving. Example:
-[{{"memory": "Likes simple answers", "category": "answer_style", "expires": null, "permanent": true, "scope": "always", "keywords": ["explain", "answer", "simple"]}},
- {{"memory": "Capstone is due in December", "category": "projects", "expires": "2026-12-31", "permanent": false, "scope": "topic", "keywords": ["capstone", "deadline", "project", "due"]}}]
+[{{"memory": "Likes simple answers", "category": "answer_style", "expires": null, "permanent": true, "scope": "always", "keywords": ["explain", "answer", "simple"], "replaces": null}},
+ {{"memory": "Capstone is due in December", "category": "projects", "expires": "2026-12-31", "permanent": false, "scope": "topic", "keywords": ["capstone", "deadline", "project", "due"], "replaces": null}}]
 
 Messages:
 {numbered}
@@ -369,6 +398,16 @@ def _clean_keywords(value):
     return [str(k).lower().strip() for k in value][:8]
 
 
+def _clean_id(value, ids):
+    """The AI may write 8, "8" or "#8". Return it as a number, only if it's a real memory id."""
+    try:
+        number = int(str(value).lstrip("#"))
+    except ValueError:
+        # null, "none", or anything that isn't a number
+        return None
+    return number if number in ids else None
+
+
 # Helper for inbox/suggestions
 def _similarity(a, b):
     """0 to 1: how many words two sentences share. 1 means exactly the same words."""
@@ -416,7 +455,8 @@ def _save_item(item):
         _clean_date(item.get("expires")),
         AUTO_PIN and item.get("permanent") is True,
         _clean_scope(item.get("scope")),
-        _clean_keywords(item.get("keywords"))
+        _clean_keywords(item.get("keywords")),
+        item.get("replaces")
     )
 
 
@@ -429,7 +469,7 @@ def _threshold(level):
 
 
 # Save memory file
-def save_memory(text, category="other", expires=None, pinned=False, scope="topic", keywords=None):
+def save_memory(text, category="other", expires=None, pinned=False, scope="topic", keywords=None, replaces=None):
     """Save one memory and return a message saying what happened."""
     text = text.strip()
     if not text:
@@ -445,6 +485,9 @@ def save_memory(text, category="other", expires=None, pinned=False, scope="topic
         if m["text"].lower() == text.lower():
             return f"Already saved as #{m['id']}."
 
+    # Which old memory this one replaces, checked before the new one is added
+    old_id = _clean_id(replaces, {m["id"] for m in data["memories"]})
+
     memory = {"id": data["next_id"], "text": text,
               "category": category, "added": _today(),
               "last_used": data.get("active_days", 0),
@@ -452,11 +495,39 @@ def save_memory(text, category="other", expires=None, pinned=False, scope="topic
               "pinned": pinned and not expires,
               "scope": scope,
               "keywords": keywords or []}
+
     data["memories"].append(memory)
     data["next_id"] += 1
+
+    # The old memory isn't true anymore, so it moves to the archive (not deleted)
+    old = next((m for m in data["memories"] if m["id"] == old_id), None)
+    if old:
+        archive = _load(ARCHIVE_FILE)
+        data["memories"].remove(old)
+        archive["memories"].append(
+            {**old, "archived": _today(), "reason": f"replaced by #{memory['id']}"})
+        _save(ARCHIVE_FILE, archive)
     _save(MEMORIES_FILE, data)
 
+    if old:
+        return f"Updated: \"{old['text']}\" -> #{memory['id']} {text}"
+
     return f"Saved #{memory['id']} [{category}] {text}"
+
+
+# Tag memory
+def _format_memory(m):
+    """One memory as a line, with tags like (pinned, until 2026-12-12, every answer)."""
+    tags = []
+    if m.get("pinned"):
+        tags.append("pinned")
+    if m.get("expires"):
+        tags.append(f"until {m['expires']}")
+    if m.get("scope") == "always":
+        tags.append("every answer")
+
+    extra = f" ({', '.join(tags)})" if tags else ""
+    return f"  {m['id']}. {m['text']}{extra}"
 
 
 # List memory
@@ -475,16 +546,7 @@ def list_memories():
     for category in sorted(groups):
         lines.append(category.upper())
         for m in sorted(groups[category], key=lambda m: m["id"]):
-            tags = []
-            if m.get("pinned"):
-                tags.append("pinned")
-            if m.get("expires"):
-                tags.append(f"until {m['expires']}")
-            if m.get("scope") == "always":
-                tags.append("every answer")
-
-            extra = f" ({', '.join(tags)})" if tags else ""
-            lines.append(f"  {m['id']}. {m['text']}{extra}")
+            lines.append(_format_memory(m))
     return "\n".join(lines)
 
 
@@ -557,6 +619,7 @@ def _learn():
     inbox = _load(INBOX_FILE)
     if not inbox["pending_messages"]:
         return
+
     try:
         items = _find_suggestions(inbox["pending_messages"])
     except Exception as error:
@@ -569,9 +632,10 @@ def _learn():
     memories = _load(MEMORIES_FILE)["memories"]
     for item in items:
         text = item["memory"]
-        # Already a memory: nothing to suggest
-        if any(_similarity(text, m["text"]) >= 0.6 for m in memories):
+        # Already a memory: nothing to suggest (unless it replaces one)
+        if not item.get("replaces") and any(_similarity(text, m["text"]) >= 0.6 for m in memories):
             continue
+
         # Already waiting: count the repeat instead of adding it twice
         same = next((s for s in inbox["suggestions"] if _similarity(
             text, s["memory"]) >= 0.6), None)
@@ -604,6 +668,13 @@ def _ask_which(count):
             f"Please press Enter, type n, or type numbers from 1 to {count} (like 2,4).")
 
 
+# Which suggestions are due
+def _due(inbox):
+    "Suggestions that have come up enough times to be shown."
+    return [s for s in inbox["suggestions"]
+            if s.get("times_seen", 1) >= _threshold(s.get("level", 0))]
+
+
 def review():
     """Show waiting suggestions as one list and save the ones you pick."""
 
@@ -611,15 +682,25 @@ def review():
     _learn()
     inbox = _load(INBOX_FILE)
     # Only show suggestions that have come up enough times
-    due = [s for s in inbox["suggestions"]
-           if s.get("times_seen", 1) >= _threshold(s.get("level", 0))]
+    due = _due(inbox)
     if not due:
         return "No new memory suggestions."
 
+    # Saved memories by id, to show what a suggestion would replace
+    saved = {m["id"]: m for m in _load(MEMORIES_FILE)["memories"]}
+
     print("\nI noticed some things that may be worth remembering:")
     for n, s in enumerate(due, start=1):
+
         until = f"  (until {s['expires']})" if _clean_date(
             s.get("expires")) else ""
+
+        # Show which saved memory this suggestion would replace
+        old = saved.get(_clean_id(s.get("replaces"), saved))
+
+        if old:
+            until += f"  (replaces #{old['id']}: {old['text']})"
+
         print(
             f"  {n}. [{_clean_category(s.get('category'))}] {s['memory']}{until}")
 
@@ -644,7 +725,7 @@ def review():
 
 # Pin - Unpin - Forget
 def set_pin(memory_id, pinned):
-    """Pin a memory so it's never archived for being unused, or upin it."""
+    """Pin a memory so it's never archived for being unused, or unpin it."""
     data = _load(MEMORIES_FILE)
     m = next((m for m in data["memories"] if m["id"] == memory_id), None)
 
@@ -795,6 +876,45 @@ Memories:
 
 
 # Commands
+def show_memories():
+    """A small menu: open a category, see eveything or the archive, or run a command."""
+    while True:
+        data, archive, inbox = _load(MEMORIES_FILE), _load(
+            ARCHIVE_FILE), _load(INBOX_FILE)
+        # Gruop memories by category, like in list_memories
+        groups = {}
+        for m in data["memories"]:
+            groups.setdefault(m.get("category", "other"), []).append(m)
+        names = sorted(groups)
+
+        print("\nYOUR MEMORY")
+        if not names:
+            print(" (nothing saved yet)")
+        for n, name in enumerate(names, start=1):
+            print(f" {n}. {name.replace('_', ' ')} ({len(groups[name])})")
+        print(f" all. everything    a. archive ({len(archive['memories'])})     "
+              f"inbox: {len(_due(inbox))} waiting")
+
+        choice = input(
+            "Open a number, 'all' or 'a', type a command like /pin 3, or press Enter to leave: ").strip()
+        if not choice:
+            return "Left the memory menu."
+        if choice.lower() == "all":
+            print(list_memories())
+        elif choice.lower() == "a":
+            print(list_archive())
+        elif choice.isdigit() and 1 <= int(choice) <= len(names):
+            name = names[int(choice) - 1]
+            print(name.replace("_", " ").upper())
+            for m in sorted(groups[name], key=lambda m: m["id"]):
+                print(_format_memory(m))
+        elif choice.startswith("/") and choice.split()[0] != "/memories":
+            # Commands work here too, but /memories inside the menu would open menu in a menu
+            print(handle_command(choice) or "Unknown command. Type /help.")
+        else:
+            print("Please type a number, all, a, a command, or press Enter.")
+
+
 def handle_message(user_message):
     """
     Call before the AI answers. Saves "remember ..." requests right away.
@@ -812,7 +932,7 @@ def handle_message(user_message):
 
 def handle_command(text):
     """
-    Runs a memory command: /memories, /review, /archive, /restore, /until, /remember, /pin, /unpin, /forget, /undo, /why, /always, /topic  <text>.
+    Runs a memory command: /memories, /review, /archive, /restore, /until, /remember, /pin, /unpin, /forget, /undo, /why, /always, /topic.
     Returns the text to print, or None if it isn't a memory command.
     """
     parts = text.split()
@@ -822,7 +942,9 @@ def handle_command(text):
     number = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
 
     if text == "/memories":
-        return list_memories()
+        return show_memories()
+    if text == "/help":
+        return HELP
     if text == "/review":
         return review()
     if text == "/archive":

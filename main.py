@@ -7,7 +7,7 @@ from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
 from datetime import datetime
 
 from prompts import SYSTEM_PROMPT
-from model import llm, ask_llm
+from model import llm, ask_llm, MODEL_NAME, MODEL_PROVIDER
 from tools import tools
 from storage import (
     create_filename,
@@ -47,7 +47,9 @@ prompt = ChatPromptTemplate.from_messages(
         ("human", "{query}"),
         ("placeholder", "{agent_scratchpad}"),
     ]
-).partial(format_instructions=parser.get_format_instructions())
+).partial(format_instructions=parser.get_format_instructions(),
+          model_name=MODEL_NAME,
+          model_provider=MODEL_PROVIDER)
 
 # Tools that agent can call
 agent = create_tool_calling_agent(
@@ -114,11 +116,12 @@ def parse_response(text):
             return None
 
 
+# Old summery: the rest of the answer that is not in the summary (steps, explanation, examples). Keep every explanation. Only write "No more details." if the summary already covers everything.
 def rewrite_as_json(text):
     """The AI skipped the JSON format, so ask it once to rewrite its own answer."""
     prompt = f"""Rewrite the answer below as JSON. Change only the structure. Do not add new facts.
 - topic: a short topic name.
-- summary: the rest of the answer that is not in the summary (steps, explanation, examples). Keep every explanation. Only write "No more details." if the summary already covers everything.
+- summary: a short answer to the question, in 1 or 2 sentences, taken from the answer below.
 - details: everything else (steps, explanation, examples). If there is nothing else, write "No more details."
 - sources: source names that appear in the answer, otherwise ["No external sources used"].
 - tools_used: []
@@ -165,7 +168,7 @@ memory_notices = pm.setup(ask_llm)
 
 # Chat structure
 print("\nAssistant: Hello. How can I help you today? ")
-print("(Type 'goodbye' to end.)")
+print("(Type 'goodbye' to end, or /help for memory commands.)")
 
 if memory_notices:
     print(f"[Memory] {memory_notices}")
@@ -185,7 +188,8 @@ try:
             continue
 
         if query.startswith("/"):
-            print(pm.handle_command(query) or "Unknown command.")
+            print(pm.handle_command(query)
+                  or "Unknown command. Type /help to see the memory commands.")
             continue
 
         if query.lower().strip(" !.") in EXIT_WORDS:
