@@ -932,7 +932,7 @@ def handle_message(user_message):
 
 def handle_command(text):
     """
-    Runs a memory command: /memories, /review, /archive, /restore, /until, /remember, /pin, /unpin, /forget, /undo, /why, /always, /topic.
+    Runs a memory command: /memories, /help, /review, /archive, /restore, /until, /remember, /pin, /unpin, /forget, /undo, /why, /always, /topic.
     Returns the text to print, or None if it isn't a memory command.
     """
     parts = text.split()
