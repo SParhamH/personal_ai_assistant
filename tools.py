@@ -12,6 +12,7 @@ from langchain_community.utilities import WikipediaAPIWrapper
 from langchain_core.tools import Tool
 
 from chat_search import search_chat
+import identity
 
 
 def safe(func, name):
@@ -120,10 +121,19 @@ code_tool = make_site_search(
     ],
 )
 
+
+def guarded_chat_search(query):
+    """Past chats belong to Parham. A guest gets a polite 'no' instead of results."""
+    if not identity.is_verified():
+        return ("Past chats are private. You cannot search them until Parham is verified. "
+                "Tell the user politely that you can't do that right now.")
+    return search_chat(query)
+
+
 # Seach chat
 chat_tool = Tool(
     name="search_chat",
-    func=safe(search_chat, "Chat search"),
+    func=safe(guarded_chat_search, "Chat search"),
     description="Search the user's past chats for a word or phrase. Use when the user asks what they said or discussed before."
 )
 
