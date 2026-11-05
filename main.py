@@ -28,7 +28,7 @@ load_dotenv()
 
 
 # Set to True to see the agent's thought process and the raw AI reply
-DEBUG = True
+DEBUG = False
 
 
 # Specify all of the fields as output from LLM
